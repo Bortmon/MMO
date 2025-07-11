@@ -75,8 +75,8 @@ impl CameraController {
         }
 
         if self.is_middle_mouse_pressed {
-            camera.yaw += self.mouse_delta_x * self.mouse_sensitivity;
-            camera.pitch -= self.mouse_delta_y * self.mouse_sensitivity;
+            camera.yaw -= self.mouse_delta_x * self.mouse_sensitivity;
+            camera.pitch += self.mouse_delta_y * self.mouse_sensitivity;
             camera.pitch = camera.pitch.clamp(5.0, 89.0);
         }
 
