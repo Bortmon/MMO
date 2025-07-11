@@ -1,17 +1,17 @@
 use crate::camera::{OsrsCamera, Projection};
 use crate::camera_controller::CameraController;
+use anyhow::Result;
 use glam::Mat4;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
-use winit::window::Window;
 use winit::event::WindowEvent;
-
+use winit::window::Window;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     position: [f32; 3],
-    color: [f32; 3],
+    tex_coords: [f32; 2],
 }
 
 #[repr(C)]
@@ -19,14 +19,8 @@ pub struct Vertex {
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
 }
-
 impl CameraUniform {
-    fn new() -> Self {
-        Self {
-            view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-        }
-    }
-
+    fn new() -> Self { Self { view_proj: Mat4::IDENTITY.to_cols_array_2d() } }
     fn update_view_proj(&mut self, camera: &OsrsCamera, projection: &Projection) {
         self.view_proj = (projection.build_projection_matrix() * camera.build_view_matrix()).to_cols_array_2d();
     }
@@ -44,25 +38,26 @@ pub struct State {
     num_indices: u32,
     camera: OsrsCamera,
     projection: Projection,
+    camera_controller: CameraController,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
-    camera_controller: CameraController,
+    diffuse_bind_group: wgpu::BindGroup,
 }
 
 impl State {
-    pub async fn new(window: Arc<Window>) -> Self {
+    pub async fn new(window: Arc<Window>) -> Result<Self> {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { ..Default::default() });
-        let surface = instance.create_surface(window).unwrap();
+        let surface = instance.create_surface(window)?;
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("Device"),
             ..Default::default()
-        },).await.unwrap();
+        },).await?;
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(surface_caps.formats[0]);
@@ -78,6 +73,81 @@ impl State {
         };
         surface.configure(&device, &config);
 
+        let diffuse_bytes = include_bytes!("../res/stone.png");
+        let diffuse_image = image::load_from_memory(diffuse_bytes)?;
+        let diffuse_rgba = diffuse_image.to_rgba8();
+
+        use image::GenericImageView;
+        let dimensions = diffuse_image.dimensions();
+
+        let diffuse_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                size: wgpu::Extent3d {
+                    width: dimensions.0,
+                    height: dimensions.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING, 
+                label: Some("diffuse_texture"),
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor, 
+            &diffuse_rgba,
+        );
+
+        let diffuse_texture_view = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+            label: Some("texture_bind_group_layout"),
+        });
+
+        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                },
+            ],
+            label: Some("diffuse_bind_group"),
+        });
+        
         let camera = OsrsCamera::new(glam::Vec3::ZERO);
         let projection = Projection::new(config.width, config.height, 45.0, 0.1, 100.0);
         let mut camera_uniform = CameraUniform::new();
@@ -124,29 +194,19 @@ impl State {
         });
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-
         const VERTICES: &[Vertex] = &[
-            Vertex { position: [-0.5, -0.5, 0.5], color: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, -0.5, 0.5], color: [0.0, 1.0, 0.0] },
-            Vertex { position: [0.5, 0.5, 0.5], color: [0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, 0.5, 0.5], color: [1.0, 1.0, 0.0] },
-            Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 0.0, 1.0] },
-            Vertex { position: [0.5, -0.5, -0.5], color: [0.0, 1.0, 1.0] },
-            Vertex { position: [0.5, 0.5, -0.5], color: [0.5, 0.5, 0.5] },
-            Vertex { position: [-0.5, 0.5, -0.5], color: [1.0, 1.0, 1.0] },
+            Vertex { position: [-0.5, -0.5, 0.5], tex_coords: [0.0, 1.0] },
+            Vertex { position: [0.5, -0.5, 0.5], tex_coords: [1.0, 1.0] },
+            Vertex { position: [0.5, 0.5, 0.5], tex_coords: [1.0, 0.0] },
+            Vertex { position: [-0.5, 0.5, 0.5], tex_coords: [0.0, 0.0] },
+            Vertex { position: [-0.5, -0.5, -0.5], tex_coords: [1.0, 1.0] },
+            Vertex { position: [0.5, -0.5, -0.5], tex_coords: [0.0, 1.0] },
+            Vertex { position: [0.5, 0.5, -0.5], tex_coords: [0.0, 0.0] },
+            Vertex { position: [-0.5, 0.5, -0.5], tex_coords: [1.0, 0.0] },
         ];
 
         const INDICES: &[u16] = &[
-            0, 1, 2, 2, 3, 0,
-            1, 5, 6, 6, 2, 1, 
-            5, 4, 7, 7, 6, 5,
-            4, 0, 3, 3, 7, 4,
-            3, 2, 6, 6, 7, 3, 
-            4, 5, 1, 1, 0, 4, 
+            0, 1, 2, 2, 3, 0, 1, 5, 6, 6, 2, 1, 5, 4, 7, 7, 6, 5, 4, 0, 3, 3, 7, 4, 3, 2, 6, 6, 7, 3, 4, 5, 1, 1, 0, 4,
         ];
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -162,15 +222,20 @@ impl State {
         });
         let num_indices = INDICES.len() as u32;
 
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
         };
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -211,7 +276,7 @@ impl State {
 
         let camera_controller = CameraController::new(2.0, 0.2);
 
-        Self {
+        Ok(Self {
             surface,
             device,
             queue,
@@ -223,17 +288,14 @@ impl State {
             num_indices,
             camera,
             projection,
+            camera_controller,
             camera_uniform,
             camera_buffer,
             camera_bind_group,
             depth_texture,
             depth_view,
-            camera_controller,
-        }
-    }
-
-    pub fn size(&self) -> winit::dpi::PhysicalSize<u32> {
-        self.size
+            diffuse_bind_group,
+        })
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -258,12 +320,7 @@ impl State {
         }
     }
 
-    pub fn update(&mut self) {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.camera_uniform.update_view_proj(&self.camera, &self.projection);
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
-    }
-
+    pub fn size(&self) -> winit::dpi::PhysicalSize<u32> { self.size }
     pub fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::KeyboardInput { event, .. } => self.camera_controller.process_keyboard(event),
@@ -273,6 +330,11 @@ impl State {
             }
             _ => false,
         }
+    }
+    pub fn update(&mut self) {
+        self.camera_controller.update_camera(&mut self.camera);
+        self.camera_uniform.update_view_proj(&self.camera, &self.projection);
+        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -306,6 +368,7 @@ impl State {
             });
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.diffuse_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);

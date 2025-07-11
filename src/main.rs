@@ -24,7 +24,14 @@ impl ApplicationHandler for App {
             let window_attributes = Window::default_attributes().with_title("MMO");
             let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
             self.window = Some(window.clone());
-            self.state = Some(pollster::block_on(State::new(window)));
+            
+            match pollster::block_on(State::new(window)) {
+                Ok(state) => self.state = Some(state),
+                Err(e) => {
+                    eprintln!("Failed to create state: {:?}", e);
+                    event_loop.exit();
+                }
+            }
         }
     }
 
