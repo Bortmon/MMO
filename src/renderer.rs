@@ -46,6 +46,7 @@ pub struct State {
     world: World,
     landscape_model: Model,
     player_model: Model,
+    player_instance_buffer: wgpu::Buffer,
 }
 
 impl State {
@@ -160,6 +161,14 @@ impl State {
         let landscape_model = Model::from_heightmap(&device, &queue, &world, &texture_bind_group_layout)?;
         let player_model: Model = model::load_gltf(&device, &queue, "res/character.glb")?;
 
+        let player_instance_data = InstanceRaw { model: Mat4::IDENTITY.to_cols_array_2d() };
+        let player_instance_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Player Instance Buffer"),
+                contents: bytemuck::cast_slice(&[player_instance_data]),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -225,6 +234,7 @@ impl State {
             world,
             landscape_model,
             player_model,
+            player_instance_buffer,
         })
     }
 
@@ -399,14 +409,14 @@ impl State {
             let player_instance_data = InstanceRaw {
                 model: player_model_matrix.to_cols_array_2d(),
             };
-            let player_instance_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Player Instance Buffer"),
-                        contents: bytemuck::cast_slice(&[player_instance_data]),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-            render_pass.set_vertex_buffer(1, player_instance_buffer.slice(..));
+            
+            self.queue.write_buffer(
+                &self.player_instance_buffer,
+                0,
+                bytemuck::cast_slice(&[player_instance_data]),
+            );
+
+            render_pass.set_vertex_buffer(1, self.player_instance_buffer.slice(..));
 
             for mesh in &self.player_model.meshes {
                 if !self.player_model.materials.is_empty() {

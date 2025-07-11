@@ -4,11 +4,11 @@ use wgpu::util::DeviceExt;
 use crate::world::WORLD_SIZE;
 use crate::world::World;
 
-
 pub mod texture {
     use super::*;
     use image::GenericImageView;
-    use wgpu::util::DeviceExt; 
+    use wgpu::util::DeviceExt;
+
     pub fn from_bytes(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -32,7 +32,7 @@ pub mod texture {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING, 
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
@@ -40,9 +40,13 @@ pub mod texture {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            label: Some(&format!("{}_sampler", label)),
+            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            anisotropy_clamp: 8,
             ..Default::default()
         });
 
@@ -56,11 +60,12 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub tex_coords: [f32; 2],
     pub normal: [f32; 3],
+    pub color: [f32; 4],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3];
+    const ATTRIBS: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3, 3 => Float32x4];
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -103,6 +108,7 @@ pub struct Mesh {
     pub num_indices: u32,
     pub material_index: usize,
 }
+
 pub trait Drawable<'a> {
     fn draw_model(&mut self, model: &'a Model, instance_buffer: &'a wgpu::Buffer, instances: u32);
 }
@@ -138,10 +144,12 @@ impl Model {
                 let y_bl = world.heightmap[x][z + 1];
                 let y_br = world.heightmap[x + 1][z + 1];
 
-                let top_left  = Vertex { position: [x as f32, y_tl, z as f32], tex_coords: [0.0, 0.0], normal: [0.0, 1.0, 0.0] };
-                let top_right = Vertex { position: [(x + 1) as f32, y_tr, z as f32], tex_coords: [1.0, 0.0], normal: [0.0, 1.0, 0.0] };
-                let bottom_left = Vertex { position: [x as f32, y_bl, (z + 1) as f32], tex_coords: [0.0, 1.0], normal: [0.0, 1.0, 0.0] };
-                let bottom_right= Vertex { position: [(x + 1) as f32, y_br, (z + 1) as f32], tex_coords: [1.0, 1.0], normal: [0.0, 1.0, 0.0] };
+                let v_color = [1.0, 1.0, 1.0, 1.0];
+
+                let top_left  = Vertex { position: [x as f32, y_tl, z as f32], tex_coords: [0.0, 0.0], normal: [0.0, 1.0, 0.0], color: v_color };
+                let top_right = Vertex { position: [(x + 1) as f32, y_tr, z as f32], tex_coords: [1.0, 0.0], normal: [0.0, 1.0, 0.0], color: v_color };
+                let bottom_left = Vertex { position: [x as f32, y_bl, (z + 1) as f32], tex_coords: [0.0, 1.0], normal: [0.0, 1.0, 0.0], color: v_color };
+                let bottom_right= Vertex { position: [(x + 1) as f32, y_br, (z + 1) as f32], tex_coords: [1.0, 1.0], normal: [0.0, 1.0, 0.0], color: v_color };
 
                 vertices.extend_from_slice(&[top_left, top_right, bottom_left, bottom_right]);
 
@@ -244,8 +252,10 @@ pub fn load_gltf<P: AsRef<Path>>(
         &white_pixel,
     );
     let fallback_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    
     let fallback_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        mag_filter: wgpu::FilterMode::Nearest,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
 
@@ -259,7 +269,6 @@ pub fn load_gltf<P: AsRef<Path>>(
             let (_texture, view, sampler) = texture::from_bytes(device, queue, &image.pixels, "gltf_texture")?;
             (view, sampler)
         } else {
-
             (fallback_view.clone(), fallback_sampler.clone())
         };
 
@@ -324,11 +333,17 @@ pub fn load_gltf<P: AsRef<Path>>(
                         None => vec![[0.0, 0.0]; positions.len()],
                     };
 
-                    let vertices: Vec<Vertex> = positions.iter().zip(normals.iter()).zip(tex_coords.iter())
-                        .map(|((pos, norm), tc)| Vertex {
+                    let colors: Vec<[f32; 4]> = match reader.read_colors(0) {
+                        Some(colors) => colors.into_rgba_f32().collect(),
+                        None => vec![[1.0, 1.0, 1.0, 1.0]; positions.len()],
+                    };
+
+                    let vertices: Vec<Vertex> = positions.iter().zip(normals.iter()).zip(tex_coords.iter()).zip(colors.iter())
+                        .map(|(((pos, norm), tc), col)| Vertex {
                             position: *pos,
                             tex_coords: *tc,
                             normal: *norm,
+                            color: *col,
                         })
                         .collect();
 
