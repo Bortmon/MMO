@@ -3,6 +3,7 @@ mod camera;
 mod camera_controller;
 mod player;
 mod model;
+mod world;
 
 use renderer::State;
 use std::sync::Arc;

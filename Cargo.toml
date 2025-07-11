@@ -13,3 +13,5 @@ bytemuck = { version = "1.15", features = ["derive"] }
 glam = { version = "0.27", features = ["bytemuck"] }
 image = "0.25"
 anyhow = "1.0"
+tobj = "4.0"
+gltf = "1.4.1"

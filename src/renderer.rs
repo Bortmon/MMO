@@ -1,51 +1,14 @@
 use crate::camera::{OsrsCamera, Projection};
 use crate::camera_controller::CameraController;
-use crate::model::{Model, Vertex};
+use crate::model::{self, InstanceRaw, Model, Vertex};
 use crate::player::Player;
+use crate::world::World;
 use anyhow::Result;
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::event::WindowEvent;
 use winit::window::Window;
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct InstanceRaw {
-    model: [[f32; 4]; 4],
-}
-
-impl InstanceRaw {
-    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
-        use std::mem;
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 7,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
-                    shader_location: 8,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ],
-        }
-    }
-}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -78,14 +41,11 @@ pub struct State {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
-    diffuse_bind_group: wgpu::BindGroup,
-    white_texture_bind_group: wgpu::BindGroup,
     player: Player,
-    cube_model: Model,
-    instance_buffer: wgpu::Buffer,
-    num_instances: u32,
+    world: World,
+    landscape_model: Model,
+    player_model: Model,
 }
 
 impl State {
@@ -95,14 +55,11 @@ impl State {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             ..Default::default()
         });
-
         let surface = instance.create_surface(window)?;
-
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .unwrap();
-
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -119,7 +76,6 @@ impl State {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
-
         let alpha_mode = if surface_caps
             .alpha_modes
             .contains(&wgpu::CompositeAlphaMode::Opaque)
@@ -128,7 +84,6 @@ impl State {
         } else {
             surface_caps.alpha_modes[0]
         };
-
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -141,115 +96,10 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        let diffuse_bytes = include_bytes!("../res/stone.png");
-        let diffuse_image = image::load_from_memory(diffuse_bytes)?;
-        let diffuse_rgba = diffuse_image.to_rgba8();
-        use image::GenericImageView;
-        let dimensions = diffuse_image.dimensions();
-        let diffuse_texture = device.create_texture_with_data(
-            &queue,
-            &wgpu::TextureDescriptor {
-                size: wgpu::Extent3d {
-                    width: dimensions.0,
-                    height: dimensions.1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                label: Some("diffuse_texture"),
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &diffuse_rgba,
-        );
-        let diffuse_texture_view =
-            diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let texture_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("texture_bind_group_layout"),
-            });
-
-        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
-                },
-            ],
-            label: Some("diffuse_bind_group"),
-        });
-
-        let white_pixel = [255, 255, 255, 255];
-        let white_texture = device.create_texture_with_data(
-            &queue,
-            &wgpu::TextureDescriptor {
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                label: Some("white_texture"),
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &white_pixel,
-        );
-        let white_texture_view =
-            white_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let white_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&white_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
-                },
-            ],
-            label: Some("white_texture_bind_group"),
-        });
-
-        let player = Player::new(Vec3::ZERO);
+        let world = World::new();
+        let player = Player::new(Vec3::new(32.0, 0.0, 32.0));
         let camera = OsrsCamera::new(player.position);
-        let projection = Projection::new(config.width, config.height, 45.0, 0.1, 100.0);
+        let projection = Projection::new(config.width, config.height, 45.0, 0.5, 500.0);
         let camera_controller = CameraController::new(2.0, 0.2);
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(&camera, &projection);
@@ -282,44 +132,33 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
-        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Depth Texture"),
-            size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = Self::create_depth_view(&device, &config);
 
-        let cube_model = Model::new_cube(&device);
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("texture_bind_group_layout"),
+            });
 
-        const NUM_INSTANCES_PER_ROW: u32 = 10;
-        const SPACE_BETWEEN: f32 = 1.0;
-        let instances = (0..NUM_INSTANCES_PER_ROW)
-            .flat_map(|z| {
-                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                    let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                    let position = glam::Vec3 { x, y: -0.5, z };
-                    let model_matrix = Mat4::from_translation(position);
-                    InstanceRaw {
-                        model: model_matrix.to_cols_array_2d(),
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Instance Buffer"),
-            contents: bytemuck::cast_slice(&instances),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let landscape_model = Model::from_heightmap(&device, &queue, &world, &texture_bind_group_layout)?;
+        let player_model: Model = model::load_gltf(&device, &queue, "res/character.glb")?;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
@@ -381,15 +220,33 @@ impl State {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
-            depth_texture,
             depth_view,
-            diffuse_bind_group,
-            white_texture_bind_group,
             player,
-            cube_model,
-            instance_buffer,
-            num_instances: instances.len() as u32,
+            world,
+            landscape_model,
+            player_model,
         })
+    }
+
+    fn create_depth_view(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> wgpu::TextureView {
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        depth_texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -399,22 +256,7 @@ impl State {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
             self.projection.resize(new_size.width, new_size.height);
-            self.depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Depth Texture"),
-                size: wgpu::Extent3d {
-                    width: self.config.width,
-                    height: self.config.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            self.depth_view =
-                self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.depth_view = Self::create_depth_view(&self.device, &self.config);
         }
     }
 
@@ -452,10 +294,7 @@ impl State {
             let t = (0.0 - ray_origin.y) / ray_direction.y;
             if t > 0.0 {
                 let intersection_point = ray_origin + t * ray_direction;
-                let tile_x = intersection_point.x.round();
-                let tile_z = intersection_point.z.round();
-                let target_pos = glam::Vec3::new(tile_x, 0.0, tile_z);
-                self.player.target_position = Some(target_pos);
+                self.player.target_position = Some(intersection_point);
             }
         }
     }
@@ -464,7 +303,7 @@ impl State {
         if let Some(target) = self.player.target_position {
             let direction = target - self.player.position;
             let distance = direction.length();
-            let speed = 0.1;
+            let speed = 0.2;
 
             if distance < speed {
                 self.player.position = target;
@@ -473,6 +312,10 @@ impl State {
                 self.player.position += direction.normalize() * speed;
             }
         }
+
+        let player_x = self.player.position.x;
+        let player_z = self.player.position.z;
+        self.player.position.y = self.world.get_height(player_x, player_z);
 
         self.camera.focus_point = self.player.position;
         self.camera_controller.update_camera(&mut self.camera);
@@ -527,18 +370,32 @@ impl State {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            render_pass.set_vertex_buffer(0, self.cube_model.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(
-                self.cube_model.index_buffer.slice(..),
-                wgpu::IndexFormat::Uint16,
-            );
+            let landscape_matrix = Mat4::IDENTITY;
+            let landscape_instance_data = InstanceRaw {
+                model: landscape_matrix.to_cols_array_2d(),
+            };
+            let landscape_instance_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Landscape Instance Buffer"),
+                        contents: bytemuck::cast_slice(&[landscape_instance_data]),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            render_pass.set_vertex_buffer(1, landscape_instance_buffer.slice(..));
+            
+            for mesh in &self.landscape_model.meshes {
+                let material = &self.landscape_model.materials[mesh.material_index];
+                render_pass.set_bind_group(1, &material.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+            }
 
-            render_pass.set_bind_group(1, &self.diffuse_bind_group, &[]);
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.draw_indexed(0..self.cube_model.num_indices, 0, 0..self.num_instances);
-
-            render_pass.set_bind_group(1, &self.white_texture_bind_group, &[]);
-            let player_model_matrix = Mat4::from_translation(self.player.position);
+            let scale = Mat4::from_scale(Vec3::splat(0.01));
+            let translation = Mat4::from_translation(self.player.position);
+            let rotation = Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            let player_model_matrix = translation * rotation * scale;
+            
             let player_instance_data = InstanceRaw {
                 model: player_model_matrix.to_cols_array_2d(),
             };
@@ -550,7 +407,16 @@ impl State {
                         usage: wgpu::BufferUsages::VERTEX,
                     });
             render_pass.set_vertex_buffer(1, player_instance_buffer.slice(..));
-            render_pass.draw_indexed(0..self.cube_model.num_indices, 0, 0..1);
+
+            for mesh in &self.player_model.meshes {
+                if !self.player_model.materials.is_empty() {
+                    let material = &self.player_model.materials[mesh.material_index];
+                    render_pass.set_bind_group(1, &material.bind_group, &[]);
+                }
+                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+            }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

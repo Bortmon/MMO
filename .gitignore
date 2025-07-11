@@ -1,2 +1,5 @@
 /target
 res/stone.png
+res/character.glb
+.gitignore
+res/character.obj
