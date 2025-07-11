@@ -1,4 +1,6 @@
 mod renderer;
+mod camera;
+mod model;
 
 use renderer::State;
 
@@ -61,6 +63,7 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                state.update();
                 match state.render() {
                     Ok(_) => {}
                     Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
@@ -69,6 +72,11 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
         }
     }
 }
