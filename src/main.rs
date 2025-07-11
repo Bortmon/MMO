@@ -1,9 +1,8 @@
 mod renderer;
 mod camera;
-mod model;
+mod camera_controller;
 
 use renderer::State;
-
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -12,7 +11,6 @@ use winit::{
     keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
-
 
 #[derive(Default)]
 struct App {
@@ -31,7 +29,6 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-
         let window = match self.window.as_ref() {
             Some(w) => w,
             None => return,
@@ -45,36 +42,41 @@ impl ApplicationHandler for App {
             return;
         }
 
-        match event {
-            WindowEvent::CloseRequested
-            | WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        logical_key: Key::Named(NamedKey::Escape),
-                        ..
-                    },
-                ..
-            } => {
-                event_loop.exit();
-            }
-            WindowEvent::Resized(physical_size) => {
-                state.resize(physical_size);
-                window.request_redraw();
-            }
-            WindowEvent::RedrawRequested => {
-                state.update();
-                match state.render() {
-                    Ok(_) => {}
-                    Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
-                    Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                    Err(e) => eprintln!("{:?}", e),
+        if !state.input(&event) {
+            match event {
+                WindowEvent::CloseRequested
+                | WindowEvent::KeyboardInput {
+                    event:
+                        KeyEvent {
+                            state: ElementState::Pressed,
+                            logical_key: Key::Named(NamedKey::Escape),
+                            ..
+                        },
+                    ..
+                } => {
+                    event_loop.exit();
                 }
+                WindowEvent::Resized(physical_size) => {
+                    state.resize(physical_size);
+                    window.request_redraw();
+                }
+                WindowEvent::RedrawRequested => {
+                    match state.render() {
+                        Ok(_) => {}
+                        Err(wgpu::SurfaceError::Lost) => state.resize(state.size()),
+                        Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
+                        Err(e) => eprintln!("{:?}", e),
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
+
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(state) = self.state.as_mut() {
+            state.update();
+        }
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }

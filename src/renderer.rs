@@ -1,8 +1,11 @@
 use crate::camera::{OsrsCamera, Projection};
+use crate::camera_controller::CameraController;
 use glam::Mat4;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
+use winit::event::WindowEvent;
+
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -46,6 +49,7 @@ pub struct State {
     camera_bind_group: wgpu::BindGroup,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    camera_controller: CameraController,
 }
 
 impl State {
@@ -205,6 +209,8 @@ impl State {
             cache: None,
         });
 
+        let camera_controller = CameraController::new(2.0, 0.2);
+
         Self {
             surface,
             device,
@@ -222,7 +228,12 @@ impl State {
             camera_bind_group,
             depth_texture,
             depth_view,
+            camera_controller,
         }
+    }
+
+    pub fn size(&self) -> winit::dpi::PhysicalSize<u32> {
+        self.size
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -248,9 +259,20 @@ impl State {
     }
 
     pub fn update(&mut self) {
-        self.camera.yaw += 0.5;
+        self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+    }
+
+    pub fn input(&mut self, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::KeyboardInput { event, .. } => self.camera_controller.process_keyboard(event),
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.camera_controller.process_scroll(delta);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
