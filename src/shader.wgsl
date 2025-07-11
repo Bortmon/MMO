@@ -17,10 +17,23 @@ struct VertexOutput {
 };
 
 @vertex
-fn vs_main(model: VertexInput) -> VertexOutput {
+fn vs_main(
+    model: VertexInput,
+    @location(5) model_matrix_col_1: vec4<f32>,
+    @location(6) model_matrix_col_2: vec4<f32>,
+    @location(7) model_matrix_col_3: vec4<f32>,
+    @location(8) model_matrix_col_4: vec4<f32>
+) -> VertexOutput {
+    let model_matrix = mat4x4<f32>(
+        model_matrix_col_1,
+        model_matrix_col_2,
+        model_matrix_col_3,
+        model_matrix_col_4,
+    );
+
     var out: VertexOutput;
-    out.clip_position = camera_uniform * vec4<f32>(model.position, 1.0);
-    out.tex_coords = model.tex_coords; 
+    out.clip_position = camera_uniform * model_matrix * vec4<f32>(model.position, 1.0);
+    out.tex_coords = model.tex_coords;
     return out;
 }
 

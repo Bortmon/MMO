@@ -17,6 +17,14 @@ impl OsrsCamera {
         }
     }
 
+    pub fn eye_position(&self) -> Vec3 {
+        let yaw_rad = self.yaw.to_radians();
+        let pitch_rad = self.pitch.to_radians();
+        let rotation = Quat::from_rotation_y(yaw_rad) * Quat::from_rotation_x(-pitch_rad);
+        let position_offset = rotation * Vec3::new(0.0, 0.0, self.distance);
+        self.focus_point + position_offset
+    }
+
     pub fn build_view_matrix(&self) -> Mat4 {
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();

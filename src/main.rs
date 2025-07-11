@@ -1,6 +1,8 @@
 mod renderer;
 mod camera;
 mod camera_controller;
+mod player;
+mod model;
 
 use renderer::State;
 use std::sync::Arc;
@@ -16,6 +18,7 @@ use winit::{
 struct App {
     window: Option<Arc<Window>>,
     state: Option<State>,
+    cursor_position: winit::dpi::PhysicalPosition<f64>,
 }
 
 impl ApplicationHandler for App {
@@ -24,13 +27,26 @@ impl ApplicationHandler for App {
             let window_attributes = Window::default_attributes().with_title("MMO");
             let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
             self.window = Some(window.clone());
-            
+
             match pollster::block_on(State::new(window)) {
                 Ok(state) => self.state = Some(state),
                 Err(e) => {
                     eprintln!("Failed to create state: {:?}", e);
                     event_loop.exit();
                 }
+            }
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            if let DeviceEvent::MouseMotion { delta } = event {
+                state.mouse_motion(delta);
             }
         }
     }
@@ -51,6 +67,16 @@ impl ApplicationHandler for App {
 
         if !state.input(&event) {
             match event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    self.cursor_position = position;
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    state.set_player_destination(self.cursor_position);
+                }
                 WindowEvent::CloseRequested
                 | WindowEvent::KeyboardInput {
                     event:
